@@ -2909,6 +2909,52 @@ fn handle_image_drop_on_markdown(
     true
 }
 
+/// The center pane that already has a singleton tab for `project_path`.
+///
+/// Language-server "show document" requests use this to reveal the file's
+/// existing tab instead of opening a second copy. Only singleton items are
+/// considered: multi-buffers that happen to contain the file are not the tab
+/// the user means.
+fn pane_containing_project_path(
+    workspace: &Workspace,
+    project_path: &ProjectPath,
+    cx: &App,
+) -> Option<WeakEntity<Pane>> {
+    workspace
+        .panes()
+        .iter()
+        .find(|pane| {
+            pane.read(cx).items().any(|item| {
+                item.buffer_kind(cx) == ItemBufferKind::Singleton
+                    && item.project_path(cx).as_ref() == Some(project_path)
+            })
+        })
+        .map(|pane| pane.downgrade())
+}
+
+/// The center pane a document opened by a language server should target.
+///
+/// Prefers a pane that can host an editor tab. `handle_pane_focused` also runs
+/// for panes inside docks, so only center panes are considered.
+fn pane_for_lsp_jump(workspace: &Workspace, cx: &App) -> Option<WeakEntity<Pane>> {
+    let is_editor_pane = |pane: &Entity<Pane>| {
+        pane.read(cx)
+            .active_item()
+            .is_none_or(|item| item.buffer_kind(cx) != ItemBufferKind::None)
+    };
+
+    let active = workspace.active_pane();
+    if is_editor_pane(active) {
+        return Some(active.downgrade());
+    }
+
+    workspace
+        .panes()
+        .iter()
+        .find(|pane| is_editor_pane(pane))
+        .map(|pane| pane.downgrade())
+}
+
 pub(crate) fn handle_lsp_show_document(
     workspace: &mut Workspace,
     request: &LanguageServerShowDocumentRequest,
@@ -2929,16 +2975,63 @@ pub(crate) fn handle_lsp_show_document(
         request.respond(false);
         return Task::ready(());
     };
-    let open_task = workspace.open_abs_path(
-        abs_path,
-        OpenOptions {
-            visible: Some(OpenVisible::None),
-            focus: Some(request.take_focus),
-            ..OpenOptions::default()
-        },
-        window,
-        cx,
-    );
+    let project_path = workspace
+        .project()
+        .read(cx)
+        .project_path_for_absolute_path(&abs_path, cx);
+    // Jump to a tab that already shows this file rather than opening a second
+    // copy of it.
+    let existing = project_path.and_then(|project_path| {
+        let pane = pane_containing_project_path(workspace, &project_path, cx)?;
+        Some((project_path, pane))
+    });
+    let open_task = match existing {
+        Some((project_path, pane)) => {
+            workspace.open_path(project_path, Some(pane), request.take_focus, window, cx)
+        }
+        // Not open yet: prefer a center pane that can host an editor tab, so a
+        // focused preview or other auxiliary view is not covered by the jump.
+        // The pane also applies to files outside the project's worktrees
+        // (package sources, external includes).
+        None => {
+            let pane = pane_for_lsp_jump(workspace, cx);
+            let take_focus = request.take_focus;
+            let abs_path_for_error = abs_path.clone();
+            cx.spawn_in(window, async move |workspace, cx| {
+                let results = workspace
+                    .update_in(cx, |workspace, window, cx| {
+                        workspace.open_paths(
+                            vec![abs_path],
+                            OpenOptions {
+                                visible: Some(OpenVisible::None),
+                                focus: Some(take_focus),
+                                ..OpenOptions::default()
+                            },
+                            pane,
+                            window,
+                            cx,
+                        )
+                    })
+                    .with_context(|| format!("open abs path {abs_path_for_error:?} task spawn"))?
+                    .await;
+                anyhow::ensure!(
+                    results.len() == 1,
+                    "open abs path {abs_path_for_error:?} task returned incorrect number of results"
+                );
+                match results
+                    .into_iter()
+                    .next()
+                    .expect("ensured single task result")
+                {
+                    Some(open_result) => open_result
+                        .with_context(|| format!("open abs path {abs_path_for_error:?} task join")),
+                    None => {
+                        anyhow::bail!("open abs path {abs_path_for_error:?} task returned None")
+                    }
+                }
+            })
+        }
+    };
     cx.spawn_in(window, async move |_, cx| {
         let success = match open_task.await {
             Ok(item) => match item.downcast::<Editor>().zip(request.selection) {

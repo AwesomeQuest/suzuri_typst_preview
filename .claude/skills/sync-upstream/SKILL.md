@@ -63,11 +63,13 @@ live in their own crates and only *register* into shared files:
 
 | File | What is ours |
 | --- | --- |
-| `Cargo.toml` | `pdf_viewer` / `typeset_preview` member and path entries |
-| `crates/zed/src/main.rs` | `markdown_live_preview::init`, `pdf_viewer::init`, `typeset_preview::init` |
+| `Cargo.toml` | `pdf_viewer` / `typeset_preview` / `typst_live_preview` / `tinymist_world_shim` members and path entries, plus the `tinymist-world` patch |
+| `crates/zed/src/main.rs` | `markdown_live_preview::init`, `pdf_viewer::init`, `typeset_preview::init`, `typst_live_preview::init` |
 | `crates/zed/src/zed.rs` | `PdfViewToolbarControls` in the toolbar block |
-| `crates/zed/src/zed/quick_action_bar/preview.rs` | `PreviewTarget::Typeset` variant and its arms |
-| `crates/project_panel/src/project_panel.rs` | header buttons, refresh, typeset menu entry |
+| `crates/zed/src/zed/quick_action_bar/preview.rs` | `PreviewTarget::Typeset` and `PreviewTarget::TypstLive` variants and their arms |
+| `crates/project_panel/src/project_panel.rs` | header buttons, refresh, typeset and Typst live preview menu entries |
+| `crates/editor/src/items.rs` | `handle_lsp_show_document` reveals an existing tab and targets a non-auxiliary center pane (`pane_containing_project_path`, `pane_for_lsp_jump`) |
+| `assets/keymaps/default-*.json` | `typst_live_preview::*` bindings; the editor-context one is scoped to `extension == typ` |
 | `crates/languages/src/lib.rs` | `markdown_oxide` module and its markdown adapter |
 | `assets/settings/default.json` | `autosave` default, live-preview settings |
 
@@ -84,14 +86,14 @@ commit first (`git log upstream/main -1 -- <file>`).
 
 ```sh
 # 1. Fork-owned crates first — API drift surfaces here and nowhere earlier.
-cargo check -p markdown_live_preview -p pdf_viewer -p typeset_preview -p languages
+cargo check -p markdown_live_preview -p pdf_viewer -p typeset_preview -p typst_live_preview -p languages
 
 # 2. The app and the shared crates the fork patches.
 #    DEVELOPER_DIR is required: CommandLineTools lacks the Metal shader compiler.
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer cargo check -p zed -p editor -p project_panel
 
 # 3. Contract tests catch semantic drift a clean compile hides.
-cargo nextest run -p markdown_live_preview -p pdf_viewer -p typeset_preview
+cargo nextest run -p markdown_live_preview -p pdf_viewer -p typeset_preview -p typst_live_preview
 
 # 4. Shared crates.
 cargo nextest run -p project_panel -p languages
